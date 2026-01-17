@@ -1,0 +1,23 @@
+# word_math_config.yaml
+scoring:
+  variant: "linear"        # linear | quadratic | interaction
+  alpha: 0.6               # weight on repetition y
+  beta: 0.4                # weight on drift z
+  gamma: 0.8               # interaction term if used
+
+thresholds:
+  # overall risk
+  high_risk_max: 0.3
+  medium_risk_max: 0.7
+
+  # raw feature triggers
+  max_repetition: 0.07      # y
+  max_drift: 0.6            # z
+
+logging:
+  hex_namespace: "WMATH"
+  enable_json_logs: true
+
+experiment:
+  save_scores: true
+  output_path: "logs/word_math_scores.jsonl"
