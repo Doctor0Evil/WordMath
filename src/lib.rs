@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Configuration for the Word-Math scoring function f(y, z).
@@ -13,8 +13,38 @@ pub struct WordMathConfig {
 impl Default for WordMathConfig {
     fn default() -> Self {
         // Example values: repetition and drift weighted equally.
-        // alpha + beta must be <= 1.0 for the linear form below.
+        // alpha + beta should be <= 1.0 for the linear form below.
         Self { alpha: 0.5, beta: 0.5 }
+    }
+}
+
+impl WordMathConfig {
+    /// Load config from environment variables:
+    /// WORD_MATH_ALPHA, WORD_MATH_BETA.
+    /// Falls back to Default if parsing fails or vars are missing.
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+
+        if let Ok(alpha_str) = std::env::var("WORD_MATH_ALPHA") {
+            if let Ok(alpha) = alpha_str.parse::<f64>() {
+                cfg.alpha = alpha;
+            }
+        }
+
+        if let Ok(beta_str) = std::env::var("WORD_MATH_BETA") {
+            if let Ok(beta) = beta_str.parse::<f64>() {
+                cfg.beta = beta;
+            }
+        }
+
+        // Optional: normalize if alpha + beta > 1.0
+        let sum = cfg.alpha + cfg.beta;
+        if sum > 1.0 && sum > 0.0 {
+            cfg.alpha /= sum;
+            cfg.beta /= sum;
+        }
+
+        cfg
     }
 }
 
@@ -26,10 +56,17 @@ pub struct WordMathAnalysis {
     pub score: f64,
 }
 
+/// Hex-stamped trace metadata for auditing.
+#[derive(Debug, Clone)]
+pub struct WordMathTrace {
+    pub hex_id: String,
+    pub message_len: usize,
+    pub topic_len: usize,
+}
+
 /// Compute repetition density y = max_w c(w) / n for a message.
 pub fn compute_repetition_density(message: &str) -> f64 {
-    // Split into words using Unicode word boundaries.
-    let words: Vec<&str> = message
+    let words: Vec<String> = message
         .unicode_words()
         .map(|w| w.to_lowercase())
         .collect();
@@ -48,17 +85,16 @@ pub fn compute_repetition_density(message: &str) -> f64 {
     max_count as f64 / n as f64
 }
 
-/// Compute topic drift z as a normalized distance in [0, 1].
+/// Jaccard-based topic drift baseline.
 ///
-/// This simple implementation uses Jaccard distance on word sets as a
-/// stand-in for a semantic distance; in a full system you would plug
-/// in embedding-based cosine distance instead.[web:51]
+/// In a future version, you can plug in an embedding-based
+/// distance here and keep this as a baseline for ablation.
 pub fn compute_topic_drift(message: &str, topic: &str) -> f64 {
-    let msg_words: std::collections::HashSet<String> = message
+    let msg_words: HashSet<String> = message
         .unicode_words()
         .map(|w| w.to_lowercase())
         .collect();
-    let topic_words: std::collections::HashSet<String> = topic
+    let topic_words: HashSet<String> = topic
         .unicode_words()
         .map(|w| w.to_lowercase())
         .collect();
@@ -79,7 +115,6 @@ pub fn compute_topic_drift(message: &str, topic: &str) -> f64 {
         0.0
     };
 
-    // Drift is 1 - similarity, already in [0, 1]
     1.0 - jaccard_similarity
 }
 
@@ -98,17 +133,43 @@ pub fn score_linear(y: f64, z: f64, cfg: WordMathConfig) -> f64 {
     score
 }
 
-/// Analyze a message given a topic string, returning y, z and f(y, z).
-pub fn analyze_message(message: &str, topic: &str, cfg: WordMathConfig) -> WordMathAnalysis {
+/// Generate a simple hex ID for tracing.
+/// This is intentionally minimal and not cryptographically strong.
+pub fn generate_hex_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    format!("{:016x}", nanos)
+}
+
+/// Analyze a message given a topic string, returning y, z, f(y, z)
+/// and a hex-stamped trace record.
+pub fn analyze_message_with_trace(
+    message: &str,
+    topic: &str,
+    cfg: WordMathConfig,
+) -> (WordMathAnalysis, WordMathTrace) {
     let y = compute_repetition_density(message);
-    let z = compute_topic_drift(message, topic);
+    let z = compute_topic_drift(message);
     let score = score_linear(y, z, cfg);
 
-    WordMathAnalysis {
+    let analysis = WordMathAnalysis {
         y_repetition: y,
         z_drift: z,
         score,
-    }
+    };
+
+    let trace = WordMathTrace {
+        hex_id: generate_hex_id(),
+        message_len: message.chars().count(),
+        topic_len: topic.chars().count(),
+    };
+
+    (analysis, trace)
 }
 
 #[cfg(test)]
@@ -124,7 +185,6 @@ mod tests {
     #[test]
     fn test_repetition_density_basic() {
         let y = compute_repetition_density("hello hello world");
-        // "hello" appears twice out of three words -> 2/3
         assert!((y - 2.0 / 3.0).abs() < 1e-6);
     }
 
